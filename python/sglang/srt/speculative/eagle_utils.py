@@ -49,10 +49,16 @@ _is_cpu = is_cpu()
 
 logger = logging.getLogger(__name__)
 
+# CUDA/ROCm sgl_kernel builds route these ops through Triton JIT instead of
+# re-exporting the AOT symbols. Fall back when the package does not expose them.
+sgl_build_tree_kernel_efficient = None
 if _is_cuda or _is_hip or _is_musa:
-    from sgl_kernel import (
-        build_tree_kernel_efficient as sgl_build_tree_kernel_efficient,
-    )
+    try:
+        from sgl_kernel import (
+            build_tree_kernel_efficient as sgl_build_tree_kernel_efficient,
+        )
+    except ImportError:
+        sgl_build_tree_kernel_efficient = None
 elif _is_cpu:
     from sgl_kernel import (
         build_tree_kernel_efficient_cpu as sgl_build_tree_kernel_efficient_cpu,
@@ -237,21 +243,6 @@ def build_tree_kernel_efficient(
             num_verify_tokens,
             tree_mask_mode,
         )
-    elif _is_xpu:
-        sgl_build_tree_kernel_triton(
-            parent_list,
-            top_scores_index,
-            seq_lens,
-            tree_mask,
-            positions,
-            retrieve_index,
-            retrieve_next_token,
-            retrieve_next_sibling,
-            topk,
-            spec_steps,
-            num_verify_tokens,
-            tree_mask_mode,
-        )
     elif _is_cpu:
         sgl_build_tree_kernel_efficient_cpu(
             parent_list,
@@ -267,8 +258,24 @@ def build_tree_kernel_efficient(
             num_verify_tokens,
             tree_mask_mode,
         )
-    else:
+    elif sgl_build_tree_kernel_efficient is not None:
         sgl_build_tree_kernel_efficient(
+            parent_list,
+            top_scores_index,
+            seq_lens,
+            tree_mask,
+            positions,
+            retrieve_index,
+            retrieve_next_token,
+            retrieve_next_sibling,
+            topk,
+            spec_steps,
+            num_verify_tokens,
+            tree_mask_mode,
+        )
+    else:
+        # CUDA/ROCm AOT export is omitted; XPU and CUDA JIT both use Triton.
+        sgl_build_tree_kernel_triton(
             parent_list,
             top_scores_index,
             seq_lens,
@@ -386,19 +393,34 @@ def verify_tree_greedy_func(
     topk: int = -1,
 ):
     if _is_cuda or _is_hip or _is_musa:
-        from sgl_kernel import verify_tree_greedy
+        try:
+            from sgl_kernel import verify_tree_greedy
+        except ImportError:
+            verify_tree_greedy = None
 
-        verify_tree_greedy(
-            predicts=predicts,  # mutable
-            accept_index=accept_index,  # mutable
-            accept_token_num=accept_token_num,  # mutable
-            candidates=candidates,
-            # kwarg LHS retained as `retrive_*` to match sgl_kernel op schema.
-            retrive_index=retrieve_index,
-            retrive_next_token=retrieve_next_token,
-            retrive_next_sibling=retrieve_next_sibling,
-            target_predict=target_predict,
-        )
+        if verify_tree_greedy is not None:
+            verify_tree_greedy(
+                predicts=predicts,  # mutable
+                accept_index=accept_index,  # mutable
+                accept_token_num=accept_token_num,  # mutable
+                candidates=candidates,
+                # kwarg LHS retained as `retrive_*` to match sgl_kernel op schema.
+                retrive_index=retrieve_index,
+                retrive_next_token=retrieve_next_token,
+                retrive_next_sibling=retrieve_next_sibling,
+                target_predict=target_predict,
+            )
+        else:
+            verify_tree_greedy_triton(
+                predicts=predicts,
+                accept_index=accept_index,
+                accept_token_num=accept_token_num,
+                candidates=candidates,
+                retrieve_index=retrieve_index,
+                retrieve_next_token=retrieve_next_token,
+                retrieve_next_sibling=retrieve_next_sibling,
+                target_predict=target_predict,
+            )
 
     elif _is_cpu:
         sgl_verify_tree_greedy_cpu(
@@ -858,14 +880,20 @@ def eagle_sample(
             from sgl_kernel import (
                 top_k_renorm_prob,
                 top_p_renorm_prob,
-                tree_speculative_sampling_target_only,
             )
 
             from sglang.kernels.ops.speculative.reject_sampling import (
                 chain_speculative_sampling_triton,
             )
 
+            try:
+                from sgl_kernel import tree_speculative_sampling_target_only
+            except ImportError:
+                tree_speculative_sampling_target_only = None
+
         use_rejection_sampling = get_spec().speculative_use_rejection_sampling
+        if tree_speculative_sampling_target_only is None:
+            use_rejection_sampling = True
 
         sampling_fn = (
             chain_speculative_sampling_triton
